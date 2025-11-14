@@ -8,7 +8,10 @@ import numpy.typing as npt
 import torch
 from jaxtyping import Bool, Float, Int
 from torch import Tensor
-
+from collections import defaultdict, Counter
+import regex
+from multiprocessing import Pool
+from cs336_basics.pretokenization_example import find_chunk_boundaries
 
 def run_linear(
     d_in: int,
@@ -300,7 +303,7 @@ def run_transformer_lm(
         num_heads (int): Number of heads to use in multi-headed attention. `d_model` must be
             evenly divisible by `num_heads`.
         d_ff (int): Dimensionality of the feed-forward inner layer (section 3.3).
-        rope_theta (float): The RoPE $\Theta$ parameter.
+        rope_theta (float): The RoPE $\\Theta$ parameter.
         weights (dict[str, Tensor]):
             State dict of our reference implementation. {num_layers} refers to an
             integer between `0` and `num_layers - 1` (the layer index).
@@ -561,6 +564,23 @@ def get_tokenizer(
     """
     raise NotImplementedError
 
+def _pretokenize_chunk(chunk_bytes: bytes) -> Counter:
+    """
+    Pre-tokenize one chunk into tokens using regex and return token counts.
+    """
+    pattern = regex.compile(
+        r"(?:[sdmt]|ll|ve|re)| ?\p{L}+| ?\p{N}+| ?[^\s\p{L}\p{N}]+|\s+(?!\S)|\s+"
+    )
+    text = chunk_bytes.decode("utf-8", errors="ignore")
+    tokens = pattern.findall(text)
+    
+    token_lists = []
+    for token in tokens:
+        token_bytes = token.encode("utf-8")
+        token_as_byte_tuple = tuple(bytes([b]) for b in token_bytes)
+        token_lists.append(token_as_byte_tuple)
+    
+    return Counter(token_lists)
 
 def run_train_bpe(
     input_path: str | os.PathLike,
@@ -589,4 +609,84 @@ def run_train_bpe(
                 representing that <token1> was merged with <token2>.
                 Merges are ordered by order of creation.
     """
-    raise NotImplementedError
+    num_processes = kwargs.get("num_processes", 4)
+    with open(input_path, "rb") as f:
+        boundaries = find_chunk_boundaries(f, num_processes, b"<|endoftext|>")
+        chunks = []
+        for i in range(len(boundaries) - 1):
+            start, end = boundaries[i], boundaries[i + 1]
+            f.seek(start)
+            chunks.append(f.read(end - start))
+
+    with Pool(num_processes) as pool:
+        counters = pool.map(_pretokenize_chunk, chunks)
+
+    global_counter = Counter()
+    for c in counters:
+        global_counter.update(c)
+    token_list = list(global_counter.items())
+
+    vocab = {i: bytes([i]) for i in range(256)}
+    next_id = 256
+    for token in special_tokens:
+        vocab[next_id] = token.encode("utf-8")
+        next_id += 1
+    now_voab_size = len(vocab)
+
+    pair_counter = defaultdict(lambda: [0, set()])
+    for i, (token, count) in enumerate(token_list):
+        for j in range(len(token) - 1):
+            pair = (token[j], token[j + 1])
+            pair_counter[pair][0] += count
+            pair_counter[pair][1].add(i)
+    merges = []
+
+    for _ in range(vocab_size - now_voab_size):
+        if not pair_counter:
+            break
+        best_pair, (_, occ_set) = max(pair_counter.items(), key=lambda x: (x[1][0],x[0]))
+        new_token = best_pair[0] + best_pair[1]
+        vocab[next_id] = new_token
+        next_id += 1
+        merges.append(best_pair)
+
+        for i in occ_set:
+            token, count = token_list[i]
+            new_token_list = []
+            j = 0
+            while j < len(token):
+                if j < len(token) - 1 and (token[j], token[j+1]) == best_pair:
+                    if(j > 0):
+                        old_pair = (token[j-1], token[j])
+                        pair_counter[old_pair][0] -= count
+                        if(pair_counter[old_pair][0] == 0):
+                            del pair_counter[old_pair]
+                        new_pair = (token[j-1], new_token)
+                        pair_counter[new_pair][0] += count
+                        pair_counter[new_pair][1].add(i)
+
+                    if(j < len(token) - 2):
+                        old_pair = (token[j+1], token[j+2])
+                        pair_counter[old_pair][0] -= count
+                        if(pair_counter[old_pair][0] == 0):
+                            del pair_counter[old_pair]
+                        new_pair = (new_token, token[j+2])
+                        pair_counter[new_pair][0] += count
+                        pair_counter[new_pair][1].add(i)
+
+                    new_token_list.append(new_token)
+                    j += 2
+                else:
+                    new_token_list.append(token[j])
+                    j += 1
+            token_list[i] = (tuple(new_token_list), count)
+
+        del pair_counter[best_pair]
+
+    return vocab, merges
+
+if __name__ == "__main__":
+    vocab, merges = run_train_bpe("tests/fixtures/test_text.ch", 300, ["<|endoftext|>"])
+    print(merges)
+    for i in range(256, len(vocab)):
+        print(f"{i}: {vocab[i]}")
