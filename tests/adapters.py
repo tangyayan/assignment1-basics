@@ -10,7 +10,8 @@ from jaxtyping import Bool, Float, Int
 from torch import Tensor
 from collections import defaultdict, Counter
 import regex
-from multiprocessing import Pool
+# from multiprocessing import Pool
+from concurrent.futures import ThreadPoolExecutor
 from cs336_basics.pretokenization_example import find_chunk_boundaries
 
 def run_linear(
@@ -564,38 +565,32 @@ def get_tokenizer(
     """
     raise NotImplementedError
 
-def encode_token_to_tuple(token: str):
-    bs = token.encode("utf-8")
-    return tuple(bytes([b]) for b in bs)
-
-def _pretokenize_chunk(chunk_bytes: bytes, special_tokens=None) -> Counter:
+PAT = r"""'(?:[sdmt]|ll|ve|re)| ?\p{L}+| ?\p{N}+| ?[^\s\p{L}\p{N}]+|\s+(?!\S)|\s+"""
+token_re = regex.compile(PAT)
+def _pretokenize_chunk(args) -> Counter:
+    input_path, start, end, special_tokens = args
+    with open(input_path, "rb") as f:
+        f.seek(start)
+        chunk_bytes = f.read(end - start)
+    
     text = chunk_bytes.decode("utf-8", errors="replace")
     counter = Counter()
-    PAT = r"""'(?:[sdmt]|ll|ve|re)| ?\p{L}+| ?\p{N}+| ?[^\s\p{L}\p{N}]+|\s+(?!\S)|\s+"""
-    token_re = regex.compile(PAT)
 
     if not special_tokens:
-        for m in token_re.finditer(text):
-            token = m.group(0)
-            counter[encode_token_to_tuple(token)] += 1
+        tokens = [m.group(0) for m in token_re.finditer(text)]#批量提取
+        encoded_tokens = [tuple(bytes([b]) for b in t.encode("utf-8")) for t in tokens]
+        counter.update(encoded_tokens)
         return counter
 
     pattern_special = regex.compile("|".join(map(regex.escape, special_tokens)))
 
-    last_end = 0
-    for m in pattern_special.finditer(text):
-        normal_text = text[last_end:m.start()]
-        for mm in token_re.finditer(normal_text):
-            token = mm.group(0)
-            counter[encode_token_to_tuple(token)] += 1
+    parts = pattern_special.split(text)
+    all_tokens = []
+    for part in parts:
+        all_tokens.extend(m.group(0) for m in token_re.finditer(part))
 
-        last_end = m.end()
-
-    tail = text[last_end:]
-    for mm in token_re.finditer(tail):
-        token = mm.group(0)
-        counter[encode_token_to_tuple(token)] += 1
-
+    encoded_tokens = [tuple(bytes([b]) for b in t.encode("utf-8")) for t in all_tokens]
+    counter.update(encoded_tokens)
     return counter
 
 def run_train_bpe(
@@ -625,19 +620,23 @@ def run_train_bpe(
                 representing that <token1> was merged with <token2>.
                 Merges are ordered by order of creation.
     """
-    num_processes = kwargs.get("num_processes", 4)
+
+    num_processes = kwargs.get("num_processes", 6)
     with open(input_path, "rb") as f:
         boundaries = find_chunk_boundaries(f, num_processes, b"<|endoftext|>")
-        chunks = []
-        for i in range(len(boundaries) - 1):
-            start, end = boundaries[i], boundaries[i + 1]
-            f.seek(start)
-            chunks.append(f.read(end - start))
+
+        if len(boundaries) <= 2:
+            boundaries = find_chunk_boundaries(f, num_processes, b" ")
+            # print("Using newline as chunk boundary.")
     
-    from functools import partial
-    pretokenize_func = partial(_pretokenize_chunk, special_tokens=special_tokens)
-    with Pool(num_processes) as pool:
-        counters = pool.map(pretokenize_func, chunks)
+    args_list = [
+        (input_path, boundaries[i], boundaries[i+1], special_tokens)
+        for i in range(len(boundaries) - 1)
+    ]
+    # with Pool(num_processes) as pool:
+    #     counters = pool.map(_pretokenize_chunk, args_list)
+    with ThreadPoolExecutor(max_workers=num_processes) as executor:
+        counters = list(executor.map(_pretokenize_chunk, args_list))
 
     global_counter = Counter()
     for c in counters:
@@ -700,11 +699,22 @@ def run_train_bpe(
             token_list[i] = (tuple(new_token_list), count)
 
         del pair_counter[best_pair]
-
+    
+    # print(f"Pre-tokenization time: {mid1_time - start_time:.2f}s")
+    # print(f"BPE training time: {end_time - mid1_time:.2f}s")
     return vocab, merges
 
 if __name__ == "__main__":
+    """
     vocab, merges = run_train_bpe("tests/fixtures/test_text.ch", 300, ["<|endoftext|>"])
     print(merges)
     for i in range(256, len(vocab)):
         print(f"{i}: {vocab[i]}")
+    """
+    
+    input_path = "tests/fixtures/corpus.en"
+    _, _ = run_train_bpe(
+        input_path=input_path,
+        vocab_size=500,
+        special_tokens=["<|endoftext|>"],
+    )
