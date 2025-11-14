@@ -564,23 +564,39 @@ def get_tokenizer(
     """
     raise NotImplementedError
 
-def _pretokenize_chunk(chunk_bytes: bytes) -> Counter:
-    """
-    Pre-tokenize one chunk into tokens using regex and return token counts.
-    """
-    pattern = regex.compile(
-        r"(?:[sdmt]|ll|ve|re)| ?\p{L}+| ?\p{N}+| ?[^\s\p{L}\p{N}]+|\s+(?!\S)|\s+"
-    )
-    text = chunk_bytes.decode("utf-8", errors="ignore")
-    tokens = pattern.findall(text)
-    
-    token_lists = []
-    for token in tokens:
-        token_bytes = token.encode("utf-8")
-        token_as_byte_tuple = tuple(bytes([b]) for b in token_bytes)
-        token_lists.append(token_as_byte_tuple)
-    
-    return Counter(token_lists)
+def encode_token_to_tuple(token: str):
+    bs = token.encode("utf-8")
+    return tuple(bytes([b]) for b in bs)
+
+def _pretokenize_chunk(chunk_bytes: bytes, special_tokens=None) -> Counter:
+    text = chunk_bytes.decode("utf-8", errors="replace")
+    counter = Counter()
+    PAT = r"""'(?:[sdmt]|ll|ve|re)| ?\p{L}+| ?\p{N}+| ?[^\s\p{L}\p{N}]+|\s+(?!\S)|\s+"""
+    token_re = regex.compile(PAT)
+
+    if not special_tokens:
+        for m in token_re.finditer(text):
+            token = m.group(0)
+            counter[encode_token_to_tuple(token)] += 1
+        return counter
+
+    pattern_special = regex.compile("|".join(map(regex.escape, special_tokens)))
+
+    last_end = 0
+    for m in pattern_special.finditer(text):
+        normal_text = text[last_end:m.start()]
+        for mm in token_re.finditer(normal_text):
+            token = mm.group(0)
+            counter[encode_token_to_tuple(token)] += 1
+
+        last_end = m.end()
+
+    tail = text[last_end:]
+    for mm in token_re.finditer(tail):
+        token = mm.group(0)
+        counter[encode_token_to_tuple(token)] += 1
+
+    return counter
 
 def run_train_bpe(
     input_path: str | os.PathLike,
@@ -617,9 +633,11 @@ def run_train_bpe(
             start, end = boundaries[i], boundaries[i + 1]
             f.seek(start)
             chunks.append(f.read(end - start))
-
+    
+    from functools import partial
+    pretokenize_func = partial(_pretokenize_chunk, special_tokens=special_tokens)
     with Pool(num_processes) as pool:
-        counters = pool.map(_pretokenize_chunk, chunks)
+        counters = pool.map(pretokenize_func, chunks)
 
     global_counter = Counter()
     for c in counters:
