@@ -13,6 +13,7 @@ import regex
 # from multiprocessing import Pool
 from concurrent.futures import ThreadPoolExecutor
 from cs336_basics.pretokenization_example import find_chunk_boundaries
+import heapq
 
 def run_linear(
     d_in: int,
@@ -593,6 +594,15 @@ def _pretokenize_chunk(args) -> Counter:
     counter.update(encoded_tokens)
     return counter
 
+class heap_elm:
+    def __init__(self, count, pair):
+        self.count = count
+        self.pair = pair
+    def __lt__(self, other):
+        if self.count != other.count:
+            return self.count > other.count
+        return self.pair > other.pair
+
 def run_train_bpe(
     input_path: str | os.PathLike,
     vocab_size: int,
@@ -635,6 +645,7 @@ def run_train_bpe(
     ]
     # with Pool(num_processes) as pool:
     #     counters = pool.map(_pretokenize_chunk, args_list)
+    print("Starting pre-tokenization...")
     with ThreadPoolExecutor(max_workers=num_processes) as executor:
         counters = list(executor.map(_pretokenize_chunk, args_list))
 
@@ -642,6 +653,7 @@ def run_train_bpe(
     for c in counters:
         global_counter.update(c)
     token_list = list(global_counter.items())
+    print("end pre-tokenization.")
 
     vocab = {i: bytes([i]) for i in range(256)}
     next_id = 256
@@ -651,22 +663,35 @@ def run_train_bpe(
     now_voab_size = len(vocab)
 
     pair_counter = defaultdict(lambda: [0, set()])
+    heap = []
     for i, (token, count) in enumerate(token_list):
         for j in range(len(token) - 1):
             pair = (token[j], token[j + 1])
             pair_counter[pair][0] += count
             pair_counter[pair][1].add(i)
+    for pair, (count, _) in pair_counter.items():
+        h = heap_elm(count, pair)
+        heapq.heappush(heap, h)#大根堆
     merges = []
 
-    for _ in range(vocab_size - now_voab_size):
+    for step in range(vocab_size - now_voab_size):
         if not pair_counter:
             break
-        best_pair, (_, occ_set) = max(pair_counter.items(), key=lambda x: (x[1][0],x[0]))
+        # best_pair, (_, occ_set) = max(pair_counter.items(), key=lambda x: (x[1][0],x[0]))
+        # """
+        while heap:
+            h = heapq.heappop(heap)
+            count, best_pair = h.count, h.pair
+            if best_pair in pair_counter and count == pair_counter[best_pair][0]:
+                occ_set = pair_counter[best_pair][1]
+                break
+        # """
         new_token = best_pair[0] + best_pair[1]
         vocab[next_id] = new_token
         next_id += 1
         merges.append(best_pair)
 
+        new_pairs = {}
         for i in occ_set:
             token, count = token_list[i]
             new_token_list = []
@@ -678,18 +703,24 @@ def run_train_bpe(
                         pair_counter[old_pair][0] -= count
                         if(pair_counter[old_pair][0] == 0):
                             del pair_counter[old_pair]
+                        else:
+                            new_pairs[old_pair] = pair_counter[old_pair][0]
                         new_pair = (token[j-1], new_token)
                         pair_counter[new_pair][0] += count
                         pair_counter[new_pair][1].add(i)
+                        new_pairs[new_pair] = pair_counter[new_pair][0]
 
                     if(j < len(token) - 2):
                         old_pair = (token[j+1], token[j+2])
                         pair_counter[old_pair][0] -= count
                         if(pair_counter[old_pair][0] == 0):
                             del pair_counter[old_pair]
+                        else:
+                            new_pairs[old_pair] = pair_counter[old_pair][0]
                         new_pair = (new_token, token[j+2])
                         pair_counter[new_pair][0] += count
                         pair_counter[new_pair][1].add(i)
+                        new_pairs[new_pair] = pair_counter[new_pair][0]
 
                     new_token_list.append(new_token)
                     j += 2
@@ -698,6 +729,9 @@ def run_train_bpe(
                     j += 1
             token_list[i] = (tuple(new_token_list), count)
 
+        for pair, count in new_pairs.items():
+            h = heap_elm(count, pair)
+            heapq.heappush(heap, h)
         del pair_counter[best_pair]
     
     # print(f"Pre-tokenization time: {mid1_time - start_time:.2f}s")
@@ -705,6 +739,8 @@ def run_train_bpe(
     return vocab, merges
 
 if __name__ == "__main__":
+    import tracemalloc
+    tracemalloc.start()
     """
     vocab, merges = run_train_bpe("tests/fixtures/test_text.ch", 300, ["<|endoftext|>"])
     print(merges)
@@ -712,9 +748,25 @@ if __name__ == "__main__":
         print(f"{i}: {vocab[i]}")
     """
     
-    input_path = "tests/fixtures/corpus.en"
-    _, _ = run_train_bpe(
+    # """
+    input_path = "data\\TinyStoriesV2-GPT4-train.txt"
+    vocab, merges = run_train_bpe(
         input_path=input_path,
-        vocab_size=500,
+        vocab_size=10000,
         special_tokens=["<|endoftext|>"],
     )
+    import json
+    vocab_json = {token.decode("latin-1"): idx for idx, token in vocab.items()}
+    with open(f"tinystories-vocab.json", "w", encoding="utf-8") as f:
+        json.dump(vocab_json, f, ensure_ascii=False, indent=2)
+
+    with open(f"tinystories-merges.txt", "w", encoding="utf-8") as f:
+        f.write("#version: 0.2\n")
+        for a, b in merges:
+            f.write(f"{a.decode('latin-1')} {b.decode('latin-1')}\n")
+
+    current, peak = tracemalloc.get_traced_memory()
+    tracemalloc.stop()
+    print(f"当前分配的内存: {current / (1024*1024):.2f} MiB")
+    print(f"峰值内存分配: {peak / (1024*1024):.2f} MiB")
+    # """
