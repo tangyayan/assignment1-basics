@@ -12,8 +12,11 @@ from collections import defaultdict, Counter
 import regex
 # from multiprocessing import Pool
 from concurrent.futures import ThreadPoolExecutor
+from functools import reduce
+import operator
 from cs336_basics.pretokenization_example import find_chunk_boundaries
 import heapq
+from typing import Iterator
 
 def run_linear(
     d_in: int,
@@ -543,8 +546,122 @@ def run_load_checkpoint(
     """
     raise NotImplementedError
 
+class Tokenizer:
+    def __init__(self, vocab, merges, special_tokens=None):
+        """
+        vocab: dict[int, bytes]
+        merges: list[tuple[bytes, bytes]]
+        special_tokens: list[str] | None = None
+        """
+        self.vocab = vocab  # {token_id: bytes}
+        self.merges = merges  # [(bytes1, bytes2), ...]
+        self.special_tokens = special_tokens or []
+        
+        self.bytes_to_id = {v: k for k, v in vocab.items()}
+        
+        self.merge_ranks = {pair: i for i, pair in enumerate(merges)}
+    
+        if self.special_tokens:
+            special_pattern = "|".join(map(regex.escape, self.special_tokens))
+            self.special_re = regex.compile(f"({special_pattern})")
+        else:
+            self.special_re = None
+    
+    @classmethod
+    def from_files(cls, vocab_filepath, merges_filepath, special_tokens=None):
+        """从文件加载 tokenizer"""
+        import json
+        
+        with open(vocab_filepath, "r", encoding="utf-8") as f:
+            vocab_json = json.load(f)
+        
+        vocab = {}
+        for token_str, token_id in vocab_json.items():
+            vocab[token_id] = token_str.encode("latin-1")
+        
+        merges = []
+        with open(merges_filepath, "r", encoding="utf-8") as f:
+            for line in f:
+                line = line.strip()
+                if not line or line.startswith("#"):
+                    continue
+                parts = line.split()
+                if len(parts) == 2:
+                    a, b = parts
+                    merges.append((a.encode("latin-1"), b.encode("latin-1")))
+        
+        return cls(vocab, merges, special_tokens)
+    
+    def _apply_merges(self, token: tuple[bytes, ...]) -> tuple[bytes, ...]:
+        """对一个 token 应用所有可能的 merges"""
+        while len(token) >= 2:
+            pairs = [(token[i], token[i+1]) for i in range(len(token) - 1)]
+            min_rank = float('inf')
+            merge_idx = -1
+            
+            for i, pair in enumerate(pairs):
+                if pair in self.merge_ranks:
+                    rank = self.merge_ranks[pair]
+                    if rank < min_rank:
+                        min_rank = rank
+                        merge_idx = i
+
+            if merge_idx == -1:
+                break
+            
+            pair = pairs[merge_idx]
+            new_token = pair[0] + pair[1]
+            token = token[:merge_idx] + (new_token,) + token[merge_idx+2:]
+        
+        return token
+    
+    def encode(self, text: str) -> list[int]:
+        """编码文本为 token IDs"""
+        token_ids = []
+        
+        if self.special_re:
+            parts = self.special_re.split(text)
+        else:
+            parts = [text]
+        
+        for part in parts:
+            if part in self.special_tokens:
+                token_bytes = part.encode("utf-8")
+                if token_bytes in self.bytes_to_id:
+                    token_ids.append(self.bytes_to_id[token_bytes])
+                continue
+            
+            for match in token_re.finditer(part):
+                word = match.group(0)
+                word_bytes = word.encode("utf-8")
+                token = tuple(bytes([b]) for b in word_bytes)
+                token = self._apply_merges(token)
+                
+                for t in token:
+                    if t in self.bytes_to_id:
+                        token_ids.append(self.bytes_to_id[t])
+        
+        return token_ids
+    
+    def encode_iterable(self, iterable: Iterable[str]) -> Iterator[int]:
+        """
+        Given an iterable of strings (e.g., a Python file handle), 
+        return a generator that lazily yields token IDs.
+        """
+        for text in iterable:
+            yield from self.encode(text)
+    
+    def decode(self, ids: list[int]) -> str:
+        """解码 token IDs 为文本"""
+        tokens = []
+        for token_id in ids:
+            if token_id in self.vocab:
+                tokens.append(self.vocab[token_id])
+        full_bytes = b"".join(tokens)
+        return full_bytes.decode("utf-8", errors="replace")
 
 def get_tokenizer(
+        
     vocab: dict[int, bytes],
     merges: list[tuple[bytes, bytes]],
     special_tokens: list[str] | None = None,
@@ -564,17 +681,23 @@ def get_tokenizer(
     Returns:
         A BPE tokenizer that uses the provided vocab, merges, and special tokens.
     """
-    raise NotImplementedError
+    return Tokenizer(vocab, merges, special_tokens)
 
 PAT = r"""'(?:[sdmt]|ll|ve|re)| ?\p{L}+| ?\p{N}+| ?[^\s\p{L}\p{N}]+|\s+(?!\S)|\s+"""
 token_re = regex.compile(PAT)
 def _pretokenize_chunk(args) -> Counter:
     input_path, start, end, special_tokens = args
+    # import psutil
+    # process = psutil.Process()
+    # chunk_id = f"{start}-{end}"
+    # print(f"[{chunk_id}] 开始,内存: {process.memory_info().rss / 1024 / 1024:.2f} MB")
+
     with open(input_path, "rb") as f:
         f.seek(start)
         chunk_bytes = f.read(end - start)
     
     text = chunk_bytes.decode("utf-8", errors="replace")
+    del chunk_bytes
     counter = Counter()
 
     if not special_tokens:
@@ -582,16 +705,23 @@ def _pretokenize_chunk(args) -> Counter:
         encoded_tokens = [tuple(bytes([b]) for b in t.encode("utf-8")) for t in tokens]
         counter.update(encoded_tokens)
         return counter
+    
+    # print(f"[{chunk_id}] 处理中,内存: {process.memory_info().rss / 1024 / 1024:.2f} MB")
 
     pattern_special = regex.compile("|".join(map(regex.escape, special_tokens)))
 
     parts = pattern_special.split(text)
+    del text
     all_tokens = []
     for part in parts:
-        all_tokens.extend(m.group(0) for m in token_re.finditer(part))
+        # all_tokens.extend(m.group(0) for m in token_re.finditer(part))
+        all_tokens.extend(token_re.findall(part))
+
+    # print(f"[{chunk_id}] 结束,内存: {process.memory_info().rss / 1024 / 1024:.2f} MB")
 
     encoded_tokens = [tuple(bytes([b]) for b in t.encode("utf-8")) for t in all_tokens]
     counter.update(encoded_tokens)
+
     return counter
 
 class heap_elm:
@@ -631,7 +761,7 @@ def run_train_bpe(
                 Merges are ordered by order of creation.
     """
 
-    num_processes = kwargs.get("num_processes", 6)
+    num_processes = kwargs.get("num_processes", 8)
     with open(input_path, "rb") as f:
         boundaries = find_chunk_boundaries(f, num_processes, b"<|endoftext|>")
 
@@ -645,15 +775,17 @@ def run_train_bpe(
     ]
     # with Pool(num_processes) as pool:
     #     counters = pool.map(_pretokenize_chunk, args_list)
-    print("Starting pre-tokenization...")
+    # print("Starting pre-tokenization...")
     with ThreadPoolExecutor(max_workers=num_processes) as executor:
         counters = list(executor.map(_pretokenize_chunk, args_list))
 
-    global_counter = Counter()
-    for c in counters:
-        global_counter.update(c)
+    # global_counter = Counter()
+    # for c in counters:
+        # global_counter.update(c)
+    # print("end pre-tokenization. Starting BPE merging...")
+    global_counter = reduce(operator.add, counters, Counter())
     token_list = list(global_counter.items())
-    print("end pre-tokenization.")
+    # print("end merging")
 
     vocab = {i: bytes([i]) for i in range(256)}
     next_id = 256
@@ -749,7 +881,8 @@ if __name__ == "__main__":
     """
     
     # """
-    input_path = "data\\TinyStoriesV2-GPT4-train.txt"
+    # input_path = "data\\TinyStoriesV2-GPT4-train.txt"
+    input_path = "tests/fixtures/tinystories_sample_5M.txt"
     vocab, merges = run_train_bpe(
         input_path=input_path,
         vocab_size=10000,
