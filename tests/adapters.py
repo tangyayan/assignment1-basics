@@ -562,6 +562,7 @@ class Tokenizer:
         self.merge_ranks = {pair: i for i, pair in enumerate(merges)}
     
         if self.special_tokens:
+            self.special_tokens = sorted(self.special_tokens, key=len, reverse=True)
             special_pattern = "|".join(map(regex.escape, self.special_tokens))
             self.special_re = regex.compile(f"({special_pattern})")
         else:
@@ -707,10 +708,9 @@ def _pretokenize_chunk(args) -> Counter:
         return counter
     
     # print(f"[{chunk_id}] 处理中,内存: {process.memory_info().rss / 1024 / 1024:.2f} MB")
+    # print("begin pretokenize chunk")
 
-    pattern_special = regex.compile("|".join(map(regex.escape, special_tokens)))
-
-    parts = pattern_special.split(text)
+    parts = text.split("<|endoftext|>")
     del text
     all_tokens = []
     for part in parts:
@@ -718,6 +718,7 @@ def _pretokenize_chunk(args) -> Counter:
         all_tokens.extend(token_re.findall(part))
 
     # print(f"[{chunk_id}] 结束,内存: {process.memory_info().rss / 1024 / 1024:.2f} MB")
+    # print("end pretokenize chunk")
 
     encoded_tokens = [tuple(bytes([b]) for b in t.encode("utf-8")) for t in all_tokens]
     counter.update(encoded_tokens)
@@ -774,7 +775,7 @@ def run_train_bpe(
         for i in range(len(boundaries) - 1)
     ]
     # with Pool(num_processes) as pool:
-    #     counters = pool.map(_pretokenize_chunk, args_list)
+        # counters = pool.map(_pretokenize_chunk, args_list)
     # print("Starting pre-tokenization...")
     with ThreadPoolExecutor(max_workers=num_processes) as executor:
         counters = list(executor.map(_pretokenize_chunk, args_list))
@@ -782,10 +783,10 @@ def run_train_bpe(
     # global_counter = Counter()
     # for c in counters:
         # global_counter.update(c)
-    # print("end pre-tokenization. Starting BPE merging...")
+    print("end pre-tokenization. Starting BPE merging...")
     global_counter = reduce(operator.add, counters, Counter())
     token_list = list(global_counter.items())
-    # print("end merging")
+    print("end merging")
 
     vocab = {i: bytes([i]) for i in range(256)}
     next_id = 256
@@ -881,8 +882,8 @@ if __name__ == "__main__":
     """
     
     # """
-    # input_path = "data\\TinyStoriesV2-GPT4-train.txt"
-    input_path = "tests/fixtures/tinystories_sample_5M.txt"
+    input_path = "data\\TinyStoriesV2-GPT4-train.txt"
+    # input_path = "tests/fixtures/tinystories_sample_5M.txt"
     vocab, merges = run_train_bpe(
         input_path=input_path,
         vocab_size=10000,

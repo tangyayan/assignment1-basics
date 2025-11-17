@@ -37,3 +37,7 @@ uv run scalene your_script.py
 内存没什么问题
 
 但是在tinystories下预分词会卡死
+
+![1763382108046](image/learn/1763382108046.png)
+
+tokenizer测试正确
