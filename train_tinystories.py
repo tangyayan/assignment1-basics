@@ -9,21 +9,29 @@ for i in range(256, len(vocab)):
 """
 
 # """
-# input_path = "data\\TinyStoriesV2-GPT4-train.txt"
-input_path = "tests/fixtures/tinystories_sample_5M.txt"
+input_path = "data/TinyStoriesV2-GPT4-train.txt" # 2227753162 bytes
+# input_path = "data/owt_train.txt"
+# input_path = "tests/fixtures/tinystories_sample_5M.txt"
 vocab, merges = run_train_bpe(
     input_path=input_path,
     vocab_size=10000,
     special_tokens=["<|endoftext|>"],
-    pretoken_file="tests/fixtures/tinystories-pretoken.pkl", 
-    # counters_file="tinystories-pretoken.pkl",
+    # pretoken_file="data/fixtures/tinystories-pretoken.pkl", 
+    counters_file="tinystories-pretoken.pkl",
 )
+# vocab, merges = run_train_bpe(
+#     input_path=input_path,
+#     vocab_size=32000,
+#     special_tokens=["<|endoftext|>"],
+#     pretoken_file="data/fixtures/owt-pretoken.pkl", 
+#     # counters_file="tinystories-pretoken.pkl",
+# )
 import json
 vocab_json = {token.decode("latin-1"): idx for idx, token in vocab.items()}
-with open(f"tests/fixtures/tinystories-vocab.json", "w", encoding="utf-8") as f:
+with open(f"data/fixtures/tinystories-vocab.json", "w", encoding="utf-8") as f:
     json.dump(vocab_json, f, ensure_ascii=False, indent=2)
 
-with open(f"tests/fixtures/tinystories-merges.txt", "w", encoding="utf-8") as f:
+with open(f"data/fixtures/tinystories-merges.txt", "w", encoding="utf-8") as f:
     f.write("#version: 0.2\n")
     for a, b in merges:
         f.write(f"{a.decode('latin-1')} {b.decode('latin-1')}\n")

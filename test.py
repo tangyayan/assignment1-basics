@@ -25,24 +25,26 @@
 # print(tuple1_>tuple2_)
 # print(tuple1>tuple2)
 
+print('你好'.encode("utf-8"))
+
 # 1. 立即运行这个测试
-import time
-import regex
+# import time
+# import regex
 
-# 假设你的正则
-token_re = regex.compile(r"""'(?:[sdmt]|ll|ve|re)| ?\p{L}+| ?\p{N}+| ?[^\s\p{L}\p{N}]+|\s+(?!\S)|\s+""")
+# # 假设你的正则
+# token_re = regex.compile(r"""'(?:[sdmt]|ll|ve|re)| ?\p{L}+| ?\p{N}+| ?[^\s\p{L}\p{N}]+|\s+(?!\S)|\s+""")
 
-# 测试不同大小文本
-test_text = "Hello world! 你好世界 123." * 100000  # 约 300KB
+# # 测试不同大小文本
+# test_text = "Hello world! 你好世界 123." * 100000  # 约 300KB
 
-t0 = time.time()
-tokens = token_re.findall(test_text)
-t1 = time.time()
+# t0 = time.time()
+# tokens = token_re.findall(test_text)
+# t1 = time.time()
 
-print(f"Text size: {len(test_text)/1024:.1f}KB")
-print(f"Time: {t1-t0:.2f}s")
-print(f"Tokens: {len(tokens)}")
-print(f"Speed: {len(test_text)/1024/(t1-t0):.1f} KB/s")
+# print(f"Text size: {len(test_text)/1024:.1f}KB")
+# print(f"Time: {t1-t0:.2f}s")
+# print(f"Tokens: {len(tokens)}")
+# print(f"Speed: {len(test_text)/1024/(t1-t0):.1f} KB/s")
 
 # 如果速度 < 100 KB/s，说明正则太慢
 # 需要优化或更换分词方法

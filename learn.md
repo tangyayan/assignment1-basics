@@ -41,3 +41,15 @@ uv run scalene your_script.py
 ![1763382108046](image/learn/1763382108046.png)
 
 tokenizer测试正确
+
+之前一直在tinysotries上运行很久，发现是预分词的时候出现了问题：
+
+1) 在linux环境中（wsl）运行快了很多
+2) 要开进程
+3) 一些`b""`和`"".encoder()`的区别
+
+后面还是出现了问题，当程序运行完阻塞住了，可能原因：
+
+1)  将`Pool`改为`ProcessPoolExecutor`
+2) 调小了split的大小
+

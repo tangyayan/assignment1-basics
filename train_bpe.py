@@ -3,7 +3,7 @@ import os
 
 from multiprocessing import Pool
 from multiprocessing.pool import ThreadPool
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import ProcessPoolExecutor
 import functools
 from functools import reduce
 import heapq
@@ -67,13 +67,15 @@ token_re = regex.compile(PAT)
 
 #     return counter
 
-def _pretokenize_chunk(chuck: tuple[int],
-                  input_path: str,
-                  special_tokens: list[str]) -> Counter:
+# def _pretokenize_chunk(chuck: tuple[int],
+#                   input_path: str,
+#                   special_tokens: list[str]) -> Counter:
+def _pretokenize_chunk(args) -> Counter:
     """
     Process each chunk of the file and update the vocabulary counter.
     """
-    start, end = chuck
+    # start, end = chuck
+    input_path, start, end, special_tokens = args
 
     special_tokens_pattern = '|'.join(special_tokens)
     # special_tokens_pattern = "|".join(map(re.escape, special_tokens))
@@ -81,13 +83,14 @@ def _pretokenize_chunk(chuck: tuple[int],
     with open(input_path, "rb") as f:
         f.seek(start)
         chunk = f.read(end - start).decode("utf-8", errors="replace")
-        # 2.1 在预分词前移除特殊标记
-        for segment in regex.split(special_tokens_pattern, chunk):
-            # 3. 预分词(pre-tokenization)
-            for match in regex.finditer(PAT, segment):
-                token = match.group()
-                if token:
-                    chunk_counter.update([tuple(bytes([b]) for b in token.encode("utf-8"))])
+    # 2.1 在预分词前移除特殊标记
+    for segment in regex.split(special_tokens_pattern, chunk):
+        # 3. 预分词(pre-tokenization)
+        for match in regex.finditer(PAT, segment):
+            token = match.group()
+            if token:
+                chunk_counter.update([tuple(bytes([b]) for b in token.encode("utf-8"))])
+    print(f"Processed chunk {start}-{end}")
     return chunk_counter
 
 class heap_elm:
@@ -142,38 +145,43 @@ def train_bpe(
             global_counter = pickle.load(f)
     else:
         with open(input_path, "rb") as f:
-            boundaries = find_chunk_boundaries(f, num_split, b"<|endoftext|>")
+            boundaries = find_chunk_boundaries(f, num_split, "<|endoftext|>".encode("utf-8"))
+            # b""的话无法识别ascall外的词
 
-            if len(boundaries) <= 2:
-                boundaries = find_chunk_boundaries(f, num_split, b" ")
-                print("Using newline as chunk boundary.")
+            # if len(boundaries) <= 2:
+            #     boundaries = find_chunk_boundaries(f, num_split, b" ")
+            #     print("Using newline as chunk boundary.")
         
         """线程级"""
-        # args_list = [
-        #     (input_path, boundaries[i], boundaries[i+1], special_tokens)
-        #     for i in range(len(boundaries) - 1)
-        # ]
-        # print("Starting pre-tokenization...")
-        # with ThreadPoolExecutor(max_workers=num_processes) as executor:
-        #     counters = list(executor.map(_pretokenize_chunk, args_list))
+        args_list = [
+            (input_path, boundaries[i], boundaries[i+1], special_tokens)
+            for i in range(len(boundaries) - 1)
+        ]
+        global_counter = Counter()
+        print(f"Total {boundaries[-1]} bytes, {len(boundaries)} chunks, using {num_processes} processes.")        
+        with ProcessPoolExecutor(max_workers=num_processes) as executor:
+            counters = list(executor.map(_pretokenize_chunk, args_list))
 
-        # # global_counter = Counter()
-        # # for c in counters:
-        #     # global_counter.update(c)
-        # print("end pre-tokenization. Starting BPE merging...")
+            for i, c in enumerate(counters):
+                global_counter.update(c)
+
+        print("end pre-tokenization. Starting BPE merging...")
         # global_counter = reduce(operator.add, counters, Counter())
 
         """进程级"""
-        global_counter = Counter()
-        print("Starting pre-tokenization...")
-        with ThreadPool(num_processes) as pool:
-            results = pool.imap_unordered(
-                    functools.partial(_pretokenize_chunk, input_path=input_path, special_tokens=special_tokens),
-                    zip(boundaries[:-1], boundaries[1:]),
-                )
+        # global_counter = Counter()
+        # print("Starting pre-tokenization...")
+        # print(f"Total {boundaries[-1]} bytes, {len(boundaries)} chunks, using {num_processes} processes.")
+        # with Pool(num_processes) as pool: # 进程比线程快很多
+        #     results = pool.imap_unordered(
+        #             functools.partial(_pretokenize_chunk, input_path=input_path, special_tokens=special_tokens),
+        #             zip(boundaries[:-1], boundaries[1:]),
+        #         )
 
-            for res in results:
-                global_counter.update(res)
+        #     for i, res in enumerate(results):
+        #         if i%100 == 0:
+        #             print(f"Merge {i} chunks")
+        #         global_counter.update(res)
         
         print("end pre-tokenization. Starting BPE merging...")
         
@@ -183,7 +191,7 @@ def train_bpe(
     token_list = list(global_counter.items())
     # # [((b't',b'h',b'e'), 2), ...]
     end = time.time()
-    print(f"end merging, used time: {end - start:.2f}s")
+    print(f"end merging, used time: {end - start:.2f}s, vocab_size: {len(token_list)}")
 
     start = time.time()
 
